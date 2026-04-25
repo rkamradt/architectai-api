@@ -1,15 +1,9 @@
 const express = require('express');
-const cors = require('cors');
 const { auth } = require('express-oauth2-jwt-bearer');
 const { MongoClient, ObjectId } = require('mongodb');
 
 const app = express();
 app.use(express.json({ limit: '4mb' }));
-app.use(cors({
-  origin: process.env.FRONTEND_URL || 'http://localhost:5173',
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Authorization', 'Content-Type'],
-}));
 
 // ── Auth0 JWT middleware ───────────────────────────────────────────────────────
 const checkJwt = auth({
