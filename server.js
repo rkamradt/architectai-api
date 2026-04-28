@@ -352,6 +352,7 @@ app.get('/api/implement/:jobId/poll', checkJwt, async (req, res) => {
     const job = await db.collection('impl_jobs').findOne({ jobId, userId });
     if (!job) return res.status(404).json({ error: 'Job not found' });
 
+    res.set('Cache-Control', 'no-store');
     res.json({
       status: job.status,          // 'running' | 'done' | 'error'
       events: job.events.slice(since),
