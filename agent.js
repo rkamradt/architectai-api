@@ -990,10 +990,30 @@ async function runSession(initialPrompt, apiKey, onProgress, outputDir, workspac
       body: JSON.stringify({ model: MODEL, max_tokens: MAX_TOKENS, tools: TOOLS, messages }),
     });
 
+    // ── Rate-limit back-off ───────────────────────────────────────────────────
+    // If the API tells us we're close to the per-minute input-token limit,
+    // sleep until the reset timestamp before continuing (or retrying on 429).
+    if (res.status === 429) {
+      const resetAt = res.headers.get('anthropic-ratelimit-input-tokens-reset');
+      const waitMs  = resetAt ? Math.max(0, new Date(resetAt).getTime() - Date.now()) + 2000 : 60000;
+      onProgress({ type: 'info', message: `Rate limited — waiting ${Math.ceil(waitMs / 1000)}s for reset`, service });
+      await sleep(waitMs);
+      continue; // retry the same request
+    }
+
     const data = await res.json();
 
     if (!res.ok) {
       throw new Error(data.error?.message || `Anthropic API error ${res.status}`);
+    }
+
+    // Warn and pause proactively if remaining input tokens are running low
+    const remaining = parseInt(res.headers.get('anthropic-ratelimit-input-tokens-remaining') || '999999', 10);
+    const resetAt   = res.headers.get('anthropic-ratelimit-input-tokens-reset');
+    if (remaining < 8000 && resetAt) {
+      const waitMs = Math.max(0, new Date(resetAt).getTime() - Date.now()) + 2000;
+      onProgress({ type: 'info', message: `Token budget low (${remaining} remaining) — waiting ${Math.ceil(waitMs / 1000)}s`, service });
+      await sleep(waitMs);
     }
 
     onProgress({
