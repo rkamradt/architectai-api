@@ -996,6 +996,7 @@ async function runSession(initialPrompt, apiKey, onProgress, outputDir, workspac
     if (res.status === 429) {
       const resetAt = res.headers.get('anthropic-ratelimit-input-tokens-reset');
       const waitMs  = resetAt ? Math.max(0, new Date(resetAt).getTime() - Date.now()) + 2000 : 60000;
+      console.warn(`[rate-limit] 429 on service=${service} — waiting ${Math.ceil(waitMs / 1000)}s until ${resetAt ?? 'unknown'}`);
       onProgress({ type: 'info', message: `Rate limited — waiting ${Math.ceil(waitMs / 1000)}s for reset`, service });
       await sleep(waitMs);
       continue; // retry the same request
@@ -1012,6 +1013,7 @@ async function runSession(initialPrompt, apiKey, onProgress, outputDir, workspac
     const resetAt   = res.headers.get('anthropic-ratelimit-input-tokens-reset');
     if (remaining < 8000 && resetAt) {
       const waitMs = Math.max(0, new Date(resetAt).getTime() - Date.now()) + 2000;
+      console.warn(`[rate-limit] token budget low: ${remaining} remaining on service=${service} — waiting ${Math.ceil(waitMs / 1000)}s until ${resetAt}`);
       onProgress({ type: 'info', message: `Token budget low (${remaining} remaining) — waiting ${Math.ceil(waitMs / 1000)}s`, service });
       await sleep(waitMs);
     }
