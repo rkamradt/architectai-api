@@ -7,6 +7,17 @@ const { runImplementationAgent } = require('./agent');
 const app = express();
 app.use(express.json({ limit: '4mb' }));
 
+// ── Request logging ───────────────────────────────────────────────────────────
+app.use((req, res, next) => {
+  const start = Date.now();
+  res.on('finish', () => {
+    const ms = Date.now() - start;
+    const userId = req.auth?.payload?.sub ?? '-';
+    console.log(`${req.method} ${req.path} ${res.statusCode} ${ms}ms user=${userId}`);
+  });
+  next();
+});
+
 // ── Auth0 JWT middleware ───────────────────────────────────────────────────────
 const checkJwt = auth({
   audience: process.env.AUTH0_AUDIENCE,
