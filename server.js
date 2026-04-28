@@ -276,10 +276,14 @@ app.post('/api/implement', checkJwt, async (req, res) => {
 
   const send = event => res.write(`data: ${JSON.stringify(event)}\n\n`);
 
+  // Heartbeat: send a ping every 20 s so Cloudflare/nginx don't close the
+  // idle connection during long Claude API calls between progress events.
+  const heartbeat = setInterval(() => res.write('data: {"type":"ping"}\n\n'), 20000);
+
   try {
     const userId = req.auth.payload.sub;
     const { repoName } = req.body;
-    if (!repoName) { send({ type: 'error', message: 'repoName is required' }); return res.end(); }
+    if (!repoName) { send({ type: 'error', message: 'repoName is required' }); clearInterval(heartbeat); return res.end(); }
 
     // Load user data from MongoDB
     const [ecoDoc, cfgDoc, userDoc] = await Promise.all([
@@ -292,9 +296,9 @@ app.post('/api/implement', checkJwt, async (req, res) => {
     const cfg       = cfgDoc?.config;
     const apiKey    = userDoc?.anthropicApiKey;
 
-    if (!ecosystem?.services?.length) { send({ type: 'error', message: 'No ecosystem defined' }); return res.end(); }
-    if (!cfg?.token)                  { send({ type: 'error', message: 'GitHub not configured' }); return res.end(); }
-    if (!apiKey)                      { send({ type: 'error', message: 'No Anthropic API key configured' }); return res.end(); }
+    if (!ecosystem?.services?.length) { send({ type: 'error', message: 'No ecosystem defined' }); clearInterval(heartbeat); return res.end(); }
+    if (!cfg?.token)                  { send({ type: 'error', message: 'GitHub not configured' }); clearInterval(heartbeat); return res.end(); }
+    if (!apiKey)                      { send({ type: 'error', message: 'No Anthropic API key configured' }); clearInterval(heartbeat); return res.end(); }
 
     send({ type: 'start', message: 'Starting implementation' });
 
@@ -311,6 +315,7 @@ app.post('/api/implement', checkJwt, async (req, res) => {
     send({ type: 'error', message: err.message });
   }
 
+  clearInterval(heartbeat);
   res.end();
 });
 
