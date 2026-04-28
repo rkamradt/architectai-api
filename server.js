@@ -1,6 +1,7 @@
 const express = require('express');
 const { auth } = require('express-oauth2-jwt-bearer');
 const { MongoClient, ObjectId } = require('mongodb');
+const { randomUUID } = require('crypto');
 const { runImplementationAgent } = require('./agent');
 
 const app = express();
@@ -21,6 +22,8 @@ MongoClient.connect(process.env.MONGODB_URI)
     db.collection('ecosystems').createIndex({ userId: 1 }, { unique: true }).catch(() => {});
     db.collection('github_configs').createIndex({ userId: 1 }, { unique: true }).catch(() => {});
     db.collection('users').createIndex({ userId: 1 }, { unique: true }).catch(() => {});
+    db.collection('impl_jobs').createIndex({ jobId: 1 }, { unique: true }).catch(() => {});
+    db.collection('impl_jobs').createIndex({ createdAt: 1 }, { expireAfterSeconds: 86400 }).catch(() => {}); // TTL: 24 h
   })
   .catch(err => { console.error('MongoDB connection failed:', err); process.exit(1); });
 
@@ -268,24 +271,20 @@ app.post('/api/github/create-repo', checkJwt, async (req, res) => {
   }
 });
 
-// ── Implement ecosystem via agent (SSE) ───────────────────────────────────────
-app.post('/api/implement', checkJwt, async (req, res) => {
-  res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache');
-  res.setHeader('Connection', 'keep-alive');
+// ── Implement ecosystem via agent (polling) ───────────────────────────────────
+//
+// Two endpoints replace the former SSE endpoint to avoid proxy read-timeout
+// (Cloudflare / nginx cuts long-lived connections after ~30 s):
+//
+//   POST /api/implement/start  → { jobId }   (returns immediately)
+//   GET  /api/implement/:jobId/poll?since=N  → { status, events, total }
 
-  const send = event => res.write(`data: ${JSON.stringify(event)}\n\n`);
-
-  // Heartbeat: send a ping every 20 s so Cloudflare/nginx don't close the
-  // idle connection during long Claude API calls between progress events.
-  const heartbeat = setInterval(() => res.write('data: {"type":"ping"}\n\n'), 20000);
-
+app.post('/api/implement/start', checkJwt, async (req, res) => {
   try {
     const userId = req.auth.payload.sub;
     const { repoName } = req.body;
-    if (!repoName) { send({ type: 'error', message: 'repoName is required' }); clearInterval(heartbeat); return res.end(); }
+    if (!repoName) return res.status(400).json({ error: 'repoName is required' });
 
-    // Load user data from MongoDB
     const [ecoDoc, cfgDoc, userDoc] = await Promise.all([
       db.collection('ecosystems').findOne({ userId }),
       db.collection('github_configs').findOne({ userId }),
@@ -296,27 +295,60 @@ app.post('/api/implement', checkJwt, async (req, res) => {
     const cfg       = cfgDoc?.config;
     const apiKey    = userDoc?.anthropicApiKey;
 
-    if (!ecosystem?.services?.length) { send({ type: 'error', message: 'No ecosystem defined' }); clearInterval(heartbeat); return res.end(); }
-    if (!cfg?.token)                  { send({ type: 'error', message: 'GitHub not configured' }); clearInterval(heartbeat); return res.end(); }
-    if (!apiKey)                      { send({ type: 'error', message: 'No Anthropic API key configured' }); clearInterval(heartbeat); return res.end(); }
+    if (!ecosystem?.services?.length) return res.status(400).json({ error: 'No ecosystem defined' });
+    if (!cfg?.token)                  return res.status(400).json({ error: 'GitHub not configured' });
+    if (!apiKey)                      return res.status(400).json({ error: 'No Anthropic API key configured' });
 
-    send({ type: 'start', message: 'Starting implementation' });
+    const jobId = randomUUID();
+    await db.collection('impl_jobs').insertOne({
+      jobId, userId, repoName, status: 'running', events: [], createdAt: new Date(),
+    });
 
-    const workspace = await runImplementationAgent(ecosystem, apiKey, event => send(event));
+    res.json({ jobId });
 
-    // Push all workspace files to GitHub
-    send({ type: 'push', message: `Pushing ${Object.keys(workspace).length} files to ${repoName}` });
-    const files = Object.entries(workspace).map(([path, content]) => ({ path, content }));
-    const { results, errors } = await pushFilesToGitHub(cfg, repoName, files);
+    // ── Run agent in background (fire-and-forget) ─────────────────────────────
+    const appendEvent = event =>
+      db.collection('impl_jobs').updateOne(
+        { jobId },
+        { $push: { events: event }, $set: { updatedAt: new Date() } }
+      );
 
-    const repoUrl = `https://github.com/${cfg.owner}/${repoName}`;
-    send({ type: 'done', message: 'Complete', repoUrl, pushed: results.length, errors });
+    runImplementationAgent(ecosystem, apiKey, appendEvent)
+      .then(async workspace => {
+        await appendEvent({ type: 'push', message: `Pushing ${Object.keys(workspace).length} files to ${repoName}` });
+        const files = Object.entries(workspace).map(([path, content]) => ({ path, content }));
+        const { results, errors } = await pushFilesToGitHub(cfg, repoName, files);
+        const repoUrl = `https://github.com/${cfg.owner}/${repoName}`;
+        await appendEvent({ type: 'done', message: 'Complete', repoUrl, pushed: results.length, errors });
+        await db.collection('impl_jobs').updateOne({ jobId }, { $set: { status: 'done' } });
+      })
+      .catch(async err => {
+        await appendEvent({ type: 'error', message: err.message });
+        await db.collection('impl_jobs').updateOne({ jobId }, { $set: { status: 'error' } });
+      });
+
   } catch (err) {
-    send({ type: 'error', message: err.message });
+    res.status(500).json({ error: err.message });
   }
+});
 
-  clearInterval(heartbeat);
-  res.end();
+app.get('/api/implement/:jobId/poll', checkJwt, async (req, res) => {
+  try {
+    const userId = req.auth.payload.sub;
+    const { jobId } = req.params;
+    const since = Math.max(0, parseInt(req.query.since || '0', 10));
+
+    const job = await db.collection('impl_jobs').findOne({ jobId, userId });
+    if (!job) return res.status(404).json({ error: 'Job not found' });
+
+    res.json({
+      status: job.status,          // 'running' | 'done' | 'error'
+      events: job.events.slice(since),
+      total:  job.events.length,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 const PORT = process.env.PORT || 8080;
