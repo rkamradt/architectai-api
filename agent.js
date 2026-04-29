@@ -20,7 +20,7 @@ const { getAllConventions } = require('./helmConventions');
 
 const ANTHROPIC_API = 'https://api.anthropic.com/v1/messages';
 const MODEL         = 'claude-sonnet-4-6';
-const MAX_TOKENS    = 8192;
+const MAX_TOKENS    = 16000;
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
