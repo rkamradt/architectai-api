@@ -18,9 +18,10 @@ const fs       = require('fs');
 const nodePath = require('path');
 const { getAllConventions } = require('./helmConventions');
 
-const ANTHROPIC_API = 'https://api.anthropic.com/v1/messages';
-const MODEL         = 'claude-sonnet-4-6';
-const MAX_TOKENS    = 16000;
+const ANTHROPIC_API   = 'https://api.anthropic.com/v1/messages';
+const MODEL_SONNET    = 'claude-sonnet-4-6';
+const MODEL_HAIKU     = 'claude-haiku-4-5-20251001';
+const MAX_TOKENS      = 16000;
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -56,6 +57,8 @@ const TOOLS = [
       },
       required: ['path'],
     },
+    // cache_control on the last tool caches the entire tools array across turns
+    cache_control: { type: 'ephemeral' },
   },
 ];
 
@@ -957,15 +960,18 @@ function stripAcknowledgedWriteResults(messages) {
   for (const block of toolUseMsg.content) {
     if (block.type === 'tool_use' && block.name === 'write_file') {
       writeFilePaths[block.id] = block.input.path;
+      // Strip the file content from the tool_use block — the path is enough for context
+      block.input = { path: block.input.path, content: '[written]' };
     }
   }
   if (Object.keys(writeFilePaths).length === 0) return;
 
+  // Strip the echoed content from tool_result blocks too
   toolResultMsg.content = toolResultMsg.content.map(block => {
     if (block.type === 'tool_result' && writeFilePaths[block.tool_use_id]) {
       return {
         ...block,
-        content: [{ type: 'text', text: `File written successfully: ${writeFilePaths[block.tool_use_id]}` }],
+        content: [{ type: 'text', text: `OK: ${writeFilePaths[block.tool_use_id]}` }],
       };
     }
     return block;
@@ -976,8 +982,13 @@ function stripAcknowledgedWriteResults(messages) {
 // Runs one complete agentic loop from a fresh message history until Claude
 // stops using tools. Writes files into workspace (and optionally to disk).
 
-async function runSession(initialPrompt, apiKey, onProgress, outputDir, workspace, service) {
-  const messages = [{ role: 'user', content: initialPrompt }];
+async function runSession(initialPrompt, apiKey, onProgress, outputDir, workspace, service, model = MODEL_SONNET) {
+  // Cache the initial (large) prompt — all subsequent turns in this session
+  // get a cache hit on it, paying only 10% of normal input-token cost.
+  const messages = [{
+    role: 'user',
+    content: [{ type: 'text', text: initialPrompt, cache_control: { type: 'ephemeral' } }],
+  }];
 
   while (true) {
     const res = await fetch(ANTHROPIC_API, {
@@ -986,8 +997,9 @@ async function runSession(initialPrompt, apiKey, onProgress, outputDir, workspac
         'Content-Type': 'application/json',
         'x-api-key': apiKey,
         'anthropic-version': '2023-06-01',
+        'anthropic-beta': 'prompt-caching-2024-07-31',
       },
-      body: JSON.stringify({ model: MODEL, max_tokens: MAX_TOKENS, tools: TOOLS, messages }),
+      body: JSON.stringify({ model, max_tokens: MAX_TOKENS, tools: TOOLS, messages }),
     });
 
     // ── Rate-limit back-off ───────────────────────────────────────────────────
@@ -1079,20 +1091,21 @@ async function runImplementationAgent(spec, apiKey, onProgress, outputDir = null
     onProgress({ type: 'service', message: `Implementing ${service.id}`, service: service.id });
     await runSession(buildServicePrompt(correctedSpec, service), apiKey, onProgress, outputDir, workspace, service.id);
 
-    // Generate companion mock service if applicable
+    // Generate companion mock service if applicable (Haiku — mechanical task)
     if (service.archetype === 'provider' && service.foreignApi?.generateMock) {
       const mockId = `${service.id}-mock`;
       onProgress({ type: 'mock', message: `Generating provider mock for ${service.id}`, service: mockId });
-      await runSession(buildProviderMockPrompt(correctedSpec, service), apiKey, onProgress, outputDir, workspace, mockId);
+      await runSession(buildProviderMockPrompt(correctedSpec, service), apiKey, onProgress, outputDir, workspace, mockId, MODEL_HAIKU);
     } else if (service.archetype === 'adaptor' && service.accepts?.generateMock) {
       const mockId = `${service.id}-mock`;
       onProgress({ type: 'mock', message: `Generating adaptor mock for ${service.id}`, service: mockId });
-      await runSession(buildAdaptorMockPrompt(correctedSpec, service), apiKey, onProgress, outputDir, workspace, mockId);
+      await runSession(buildAdaptorMockPrompt(correctedSpec, service), apiKey, onProgress, outputDir, workspace, mockId, MODEL_HAIKU);
     }
   }
 
   onProgress({ type: 'service', message: 'Writing root files', service: 'root' });
-  await runSession(buildRootPrompt(correctedSpec), apiKey, onProgress, outputDir, workspace, 'root');
+  // Root session is template assembly — Haiku is sufficient and much cheaper
+  await runSession(buildRootPrompt(correctedSpec), apiKey, onProgress, outputDir, workspace, 'root', MODEL_HAIKU);
 
   // ── HELM CHART GENERATION (not yet active) ─────────────────────────────────
   // Uncomment the block below to enable helm chart generation.
