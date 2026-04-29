@@ -387,8 +387,15 @@ app.post('/api/implement/start', checkJwt, async (req, res) => {
         { $push: { events: event }, $set: { updatedAt: new Date() } }
       );
 
-    runImplementationAgent(ecosystem, apiKey, appendEvent)
+    const isCancelled = async () => {
+      const job = await db.collection('impl_jobs').findOne({ jobId }, { projection: { status: 1 } });
+      return job?.status === 'cancelled';
+    };
+
+    runImplementationAgent(ecosystem, apiKey, appendEvent, null, isCancelled)
       .then(async workspace => {
+        const job = await db.collection('impl_jobs').findOne({ jobId }, { projection: { status: 1 } });
+        if (job?.status === 'cancelled') return; // don't push if cancelled
         await appendEvent({ type: 'push', message: `Pushing ${Object.keys(workspace).length} files to ${repoName}` });
         const files = Object.entries(workspace).map(([path, content]) => ({ path, content }));
         const { results, errors } = await pushFilesToGitHub(cfg, repoName, files);
@@ -401,6 +408,20 @@ app.post('/api/implement/start', checkJwt, async (req, res) => {
         await db.collection('impl_jobs').updateOne({ jobId }, { $set: { status: 'error' } });
       });
 
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/implement/:jobId/cancel', checkJwt, async (req, res) => {
+  try {
+    const userId = req.auth.payload.sub;
+    const { jobId } = req.params;
+    const result = await db.collection('impl_jobs').updateOne(
+      { jobId, userId, status: 'running' },
+      { $set: { status: 'cancelled', updatedAt: new Date() } }
+    );
+    res.json({ ok: result.modifiedCount > 0 });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

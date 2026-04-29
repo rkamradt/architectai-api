@@ -1091,28 +1091,38 @@ async function runSession(initialPrompt, apiKey, onProgress, outputDir, workspac
 
 // ── Orchestrator ──────────────────────────────────────────────────────────────
 
-async function runImplementationAgent(spec, apiKey, onProgress, outputDir = null) {
+async function runImplementationAgent(spec, apiKey, onProgress, outputDir = null, isCancelled = async () => false) {
   const workspace = {};
 
   // Validate and correct archetype naming conventions before generating
   const correctedSpec = correctArchetypeNames(spec, onProgress);
 
   for (const service of correctedSpec.services) {
+    if (await isCancelled()) {
+      onProgress({ type: 'info', message: 'Implementation cancelled', service: 'root' });
+      return workspace;
+    }
     onProgress({ type: 'service', message: `Implementing ${service.id}`, service: service.id });
     await runSession(buildServicePrompt(correctedSpec, service), apiKey, onProgress, outputDir, workspace, service.id);
 
     // Generate companion mock service if applicable (Haiku — mechanical task)
     if (service.archetype === 'provider' && service.foreignApi?.generateMock) {
+      if (await isCancelled()) { onProgress({ type: 'info', message: 'Implementation cancelled', service: 'root' }); return workspace; }
       const mockId = `${service.id}-mock`;
       onProgress({ type: 'mock', message: `Generating provider mock for ${service.id}`, service: mockId });
       await runSession(buildProviderMockPrompt(correctedSpec, service), apiKey, onProgress, outputDir, workspace, mockId, MODEL_HAIKU);
     } else if (service.archetype === 'adaptor' && service.accepts?.generateMock) {
+      if (await isCancelled()) { onProgress({ type: 'info', message: 'Implementation cancelled', service: 'root' }); return workspace; }
       const mockId = `${service.id}-mock`;
       onProgress({ type: 'mock', message: `Generating adaptor mock for ${service.id}`, service: mockId });
       await runSession(buildAdaptorMockPrompt(correctedSpec, service), apiKey, onProgress, outputDir, workspace, mockId, MODEL_HAIKU);
     }
   }
 
+  if (await isCancelled()) {
+    onProgress({ type: 'info', message: 'Implementation cancelled', service: 'root' });
+    return workspace;
+  }
   onProgress({ type: 'service', message: 'Writing root files', service: 'root' });
   // Root session is template assembly — Haiku is sufficient and much cheaper
   await runSession(buildRootPrompt(correctedSpec), apiKey, onProgress, outputDir, workspace, 'root', MODEL_HAIKU);
