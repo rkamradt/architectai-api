@@ -7,6 +7,12 @@ const { runImplementationAgent } = require('./agent');
 const app = express();
 app.use(express.json({ limit: '4mb' }));
 
+// ── Disable caching for all API routes ───────────────────────────────────────
+app.use('/api', (req, res, next) => {
+  res.set('Cache-Control', 'no-store');
+  next();
+});
+
 // ── Request logging ───────────────────────────────────────────────────────────
 app.use((req, res, next) => {
   const start = Date.now();
