@@ -225,10 +225,13 @@ ${sid}/Dockerfile
   - Stage 1 (deps): WORKDIR /app, COPY package*.json ., RUN npm ci --only=production
   - Stage 2 (runtime): WORKDIR /app, COPY --from=deps /app/node_modules ./node_modules, COPY . ., EXPOSE 8080, CMD ["node","src/index.js"]
 
-${sid}/.github/workflows/publish.yml
-  - on: push to main
+.github/workflows/${sid}.yml
+  - name: "Build ${sid}"
+  - on: push branches [main], paths ["${sid}/**"]
   - job: build-and-push using actions/checkout@v4, docker/login-action@v3 (ghcr.io, GITHUB_TOKEN), docker/build-push-action@v5
+  - build context: ./${sid}, dockerfile: ./${sid}/Dockerfile
   - image tag: ghcr.io/rkamradt/${sid}:main
+  - IMPORTANT: write this file to ".github/workflows/${sid}.yml" (repo root), NOT inside the service directory
 
 ${sid}/CLAUDE.md
   - Context file for future Claude Code sessions on this service

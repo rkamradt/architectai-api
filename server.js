@@ -282,6 +282,69 @@ app.post('/api/github/create-repo', checkJwt, async (req, res) => {
   }
 });
 
+// ── GitHub Actions status ─────────────────────────────────────────────────────
+// Returns the most recent workflow run per service for a given repo.
+// The frontend polls this every 30s after an implement completes to track CI.
+//
+// Workflow files are written to .github/workflows/{service-id}.yml at repo root.
+// We extract the service ID from the workflow path in the API response.
+
+app.get('/api/github/actions-status', checkJwt, async (req, res) => {
+  try {
+    const userId = req.auth.payload.sub;
+    const { repoName } = req.query;
+    if (!repoName) return res.status(400).json({ error: 'repoName is required' });
+
+    const cfgDoc = await db.collection('github_configs').findOne({ userId });
+    const cfg = cfgDoc?.config;
+    if (!cfg?.token || !cfg?.owner) return res.status(400).json({ error: 'GitHub not configured' });
+
+    const url = `https://api.github.com/repos/${cfg.owner}/${repoName}/actions/runs?branch=main&per_page=100`;
+    const ghRes = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${cfg.token}`,
+        Accept: 'application/vnd.github.v3+json',
+      },
+    });
+
+    if (!ghRes.ok) {
+      const err = await ghRes.json().catch(() => ({}));
+      return res.status(ghRes.status).json({ error: err.message || `GitHub ${ghRes.status}` });
+    }
+
+    const { workflow_runs: runs = [] } = await ghRes.json();
+
+    // Group runs by service ID (extracted from .github/workflows/{service-id}.yml)
+    // and keep only the most recent run per service.
+    const statuses = {};
+    for (const run of runs) {
+      const match = run.path?.match(/^\.github\/workflows\/(.+)\.yml$/);
+      if (!match) continue;
+      const serviceId = match[1];
+      if (statuses[serviceId]) continue; // already have a more recent run (API returns newest first)
+
+      let status;
+      if (run.status === 'completed') {
+        status = run.conclusion === 'success' ? 'built' : 'build_failed';
+      } else {
+        status = 'building'; // queued or in_progress
+      }
+
+      statuses[serviceId] = {
+        status,
+        conclusion: run.conclusion,
+        url: run.html_url,
+        runId: run.id,
+        createdAt: run.created_at,
+      };
+    }
+
+    res.json({ statuses });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── Implement ecosystem via agent (polling) ───────────────────────────────────
 //
 // Two endpoints replace the former SSE endpoint to avoid proxy read-timeout
