@@ -1064,7 +1064,6 @@ async function runSession(initialPrompt, apiKey, onProgress, outputDir, workspac
     });
 
     messages.push({ role: 'user', content: toolResults });
-    await sleep(4000);
   }
 }
 
