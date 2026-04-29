@@ -218,7 +218,13 @@ async function pushFilesToGitHub(cfg, repoName, files) {
       };
       const putRes = await fetch(url, { method: 'PUT', headers: ghHeaders, body: JSON.stringify(body) });
       const data   = await putRes.json();
-      if (!putRes.ok) throw new Error(data.message || `GitHub ${putRes.status} on ${file.path}`);
+      if (!putRes.ok) {
+        const isWorkflow = file.path.startsWith('.github/workflows/');
+        const msg = (isWorkflow && putRes.status === 404)
+          ? `Not Found — your PAT requires the 'workflow' scope to push GitHub Actions files. Regenerate your token with 'workflow' checked.`
+          : (data.message || `GitHub ${putRes.status} on ${file.path}`);
+        throw new Error(msg);
+      }
       results.push({ path: file.path, sha: data.content?.sha });
     } catch (err) {
       errors.push({ path: file.path, error: err.message });
