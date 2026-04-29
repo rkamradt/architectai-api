@@ -399,6 +399,10 @@ app.post('/api/implement/start', checkJwt, async (req, res) => {
         await appendEvent({ type: 'push', message: `Pushing ${Object.keys(workspace).length} files to ${repoName}` });
         const files = Object.entries(workspace).map(([path, content]) => ({ path, content }));
         const { results, errors } = await pushFilesToGitHub(cfg, repoName, files);
+        if (errors.length > 0) {
+          console.error(`[push] ${errors.length} file(s) failed pushing to ${repoName}:`);
+          errors.forEach(e => console.error(`  [push] FAILED ${e.path}: ${e.error}`));
+        }
         const repoUrl = `https://github.com/${cfg.owner}/${repoName}`;
         await appendEvent({ type: 'done', message: 'Complete', repoUrl, pushed: results.length, errors });
         await db.collection('impl_jobs').updateOne({ jobId }, { $set: { status: 'done' } });
