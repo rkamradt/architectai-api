@@ -511,12 +511,15 @@ Events consumed:
 ${consumes.map(e => `  ◀ ${e.topic} — ${e.description}`).join('\n') || '  (none)'}
 Depends on: ${depText}
 
-## Required files (every path MUST start with "${sid}/")
+## Required files
 
 ${requiredFilesSection(spec, service)}
 
 ## Rules
-- Every path must begin with "${sid}/" — no exceptions
+- All service source files must be under "${sid}/" (e.g. "${sid}/src/index.js")
+- The ONE exception: the GitHub Actions workflow goes at ".github/workflows/${sid}.yml" (repo root)
+- Write each file EXACTLY ONCE. Do not re-write a file you have already written.
+- When every file listed above has been written, stop calling tools immediately.
 - Write complete, production-quality file content — no truncation, no "TODO: implement" stubs
 - Use real domain field names throughout — no foo/bar/baz placeholders
 - Do not ask questions or explain anything. Just write files.
