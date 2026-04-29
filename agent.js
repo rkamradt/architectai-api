@@ -225,14 +225,6 @@ ${sid}/Dockerfile
   - Stage 1 (deps): WORKDIR /app, COPY package*.json ., RUN npm ci --only=production
   - Stage 2 (runtime): WORKDIR /app, COPY --from=deps /app/node_modules ./node_modules, COPY . ., EXPOSE 8080, CMD ["node","src/index.js"]
 
-.github/workflows/${sid}.yml
-  - name: "Build ${sid}"
-  - on: push branches [main], paths ["${sid}/**"]
-  - job: build-and-push using actions/checkout@v4, docker/login-action@v3 (ghcr.io, GITHUB_TOKEN), docker/build-push-action@v5
-  - build context: ./${sid}, dockerfile: ./${sid}/Dockerfile
-  - image tag: ghcr.io/rkamradt/${sid}:main
-  - IMPORTANT: write this file to ".github/workflows/${sid}.yml" (repo root), NOT inside the service directory
-
 ${sid}/CLAUDE.md
   - Context file for future Claude Code sessions on this service
   - Opening: "# ${service.name} — Claude Code Context"
@@ -516,8 +508,7 @@ Depends on: ${depText}
 ${requiredFilesSection(spec, service)}
 
 ## Rules
-- All service source files must be under "${sid}/" (e.g. "${sid}/src/index.js")
-- The ONE exception: the GitHub Actions workflow goes at ".github/workflows/${sid}.yml" (repo root)
+- Every path must begin with "${sid}/" — no exceptions
 - Write each file EXACTLY ONCE. Do not re-write a file you have already written.
 - When every file listed above has been written, stop calling tools immediately.
 - Write complete, production-quality file content — no truncation, no "TODO: implement" stubs
@@ -596,8 +587,21 @@ README.md
   - Section "Mock services (dev/stage only)": for each -mock directory, explain its purpose and how to use it
   - Section "⚠️ Production deployment": state that -mock directories must never be deployed to production
 
+${spec.services.map(s => `
+.github/workflows/${s.id}.yml
+  - name: "Build ${s.id}"
+  - on: push branches [main], paths ["${s.id}/**"]
+  - jobs.build: runs-on ubuntu-latest
+      steps:
+        - uses: actions/checkout@v4
+        - uses: docker/login-action@v3 (registry: ghcr.io, username: \${{ github.actor }}, password: \${{ secrets.GITHUB_TOKEN }})
+        - uses: docker/build-push-action@v5 (context: ./${s.id}, push: true, tags: ghcr.io/rkamradt/${s.id}:main)
+`).join('')}
 ## Rules
 - Write only root-level files — no paths starting with a service id or mock id
+- Write each .github/workflows/{service-id}.yml file exactly as specified above
+- Write each file EXACTLY ONCE. Do not re-write a file you have already written.
+- When every file listed above has been written, stop calling tools immediately.
 - Do not ask questions or explain anything. Just write files.
 `;
 }
@@ -966,13 +970,13 @@ function stripAcknowledgedWriteResults(messages) {
   for (const block of toolUseMsg.content) {
     if (block.type === 'tool_use' && block.name === 'write_file') {
       writeFilePaths[block.id] = block.input.path;
-      // Strip the file content from the tool_use block — the path is enough for context
-      block.input = { path: block.input.path, content: '[written]' };
     }
   }
   if (Object.keys(writeFilePaths).length === 0) return;
 
-  // Strip the echoed content from tool_result blocks too
+  // Collapse tool_result content to just the path — the OK echo is tiny overhead
+  // but keeping it short avoids accumulating large ack messages in history.
+  // Do NOT touch the tool_use blocks — Claude needs to see what it wrote.
   toolResultMsg.content = toolResultMsg.content.map(block => {
     if (block.type === 'tool_result' && writeFilePaths[block.tool_use_id]) {
       return {
