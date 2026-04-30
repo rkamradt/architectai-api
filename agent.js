@@ -590,7 +590,7 @@ README.md
 ${spec.services.map(s => `
 .github/workflows/${s.id}.yml
   - name: "Build ${s.id}"
-  - on: push branches [main], paths ["${s.id}/**"]
+  - on: push branches [main] paths ["${s.id}/**"], workflow_dispatch (no inputs needed)
   - jobs.build: runs-on ubuntu-latest
       steps:
         - uses: actions/checkout@v4
