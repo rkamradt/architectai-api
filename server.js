@@ -151,6 +151,7 @@ MongoClient.connect(process.env.MONGODB_URI)
     db = client.db('architectai');
     console.log('MongoDB connected');
     db.collection('users').createIndex({ userId: 1 }, { unique: true }).catch(() => {});
+    db.collection('ecosystems').createIndex({ userId: 1 }, { unique: true }).catch(() => {});
   })
   .catch(err => { console.error('MongoDB connection failed:', err); process.exit(1); });
 
@@ -255,6 +256,40 @@ app.post('/api/messages', checkJwt, async (req, res) => {
   }
 });
 
+// ── Ecosystem scratch-pad ─────────────────────────────────────────────────────
+// Schema: { userId, projectName, services, repoName, updatedAt }
+// This is the in-progress working state — persisted so sessions can resume
+// from any device. GitHub is still the canonical published store.
+
+app.get('/api/ecosystem', checkJwt, async (req, res) => {
+  try {
+    const userId = req.auth.payload.sub;
+    const doc = await db.collection('ecosystems').findOne({ userId });
+    res.json({
+      projectName: doc?.projectName || '',
+      services:    doc?.services    || [],
+      repoName:    doc?.repoName    || '',
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/api/ecosystem', checkJwt, async (req, res) => {
+  try {
+    const userId = req.auth.payload.sub;
+    const { projectName = '', services = [], repoName = '' } = req.body;
+    await db.collection('ecosystems').updateOne(
+      { userId },
+      { $set: { projectName, services, repoName, updatedAt: new Date() } },
+      { upsert: true }
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── GitHub helpers ────────────────────────────────────────────────────────────
 async function getGithubCreds(userId) {
   const doc = await db.collection('users').findOne({ userId });
@@ -286,9 +321,18 @@ app.post('/api/github/pull', checkJwt, async (req, res) => {
     const { content } = await ghRes.json();
     if (!content) return res.status(404).json({ error: 'ecosystem.json not found in that repo' });
 
-    const text   = Buffer.from(content.replace(/\n/g, ''), 'base64').toString('utf-8');
-    const parsed = JSON.parse(text);
-    res.json({ projectName: parsed.project || '', services: parsed.services || [] });
+    const text       = Buffer.from(content.replace(/\n/g, ''), 'base64').toString('utf-8');
+    const parsed     = JSON.parse(text);
+    const projectName = parsed.project  || '';
+    const services    = parsed.services || [];
+
+    // Persist to the scratch-pad so the session can resume from any device
+    await db.collection('ecosystems').updateOne(
+      { userId },
+      { $set: { projectName, services, repoName, updatedAt: new Date() } },
+      { upsert: true }
+    );
+    res.json({ projectName, services, repoName });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -339,19 +383,21 @@ async function pushFilesToGitHub(creds, repoName, files) {
 }
 
 // ── GitHub push ───────────────────────────────────────────────────────────────
-// Accepts either { repoName, ecosystem } (preferred) or { repoName, files } (legacy).
+// Reads the ecosystem from the DB scratch-pad — no body needed.
 app.post('/api/github/push', checkJwt, async (req, res) => {
   try {
     const userId = req.auth.payload.sub;
-    const { repoName, ecosystem, files: rawFiles } = req.body;
-    if (!repoName) return res.status(400).json({ error: 'repoName is required' });
 
     const creds = await getGithubCreds(userId);
     if (!creds) return res.status(400).json({ error: 'GitHub not configured' });
 
-    const files = ecosystem ? buildPushFiles(ecosystem) : (rawFiles || []);
-    const { results, errors } = await pushFilesToGitHub(creds, repoName, files);
-    res.json({ ok: errors.length === 0, results, errors });
+    const ecosystemDoc = await db.collection('ecosystems').findOne({ userId });
+    if (!ecosystemDoc?.repoName) return res.status(400).json({ error: 'No repo set — load an ecosystem or run implement first' });
+    if (!ecosystemDoc?.services?.length) return res.status(400).json({ error: 'No services defined yet' });
+
+    const files = buildPushFiles(ecosystemDoc);
+    const { results, errors } = await pushFilesToGitHub(creds, ecosystemDoc.repoName, files);
+    res.json({ ok: errors.length === 0, repoName: ecosystemDoc.repoName, results, errors });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -436,12 +482,14 @@ app.get('/api/github/actions-status', checkJwt, async (req, res) => {
 app.post('/api/implement/start', checkJwt, async (req, res) => {
   try {
     const userId = req.auth.payload.sub;
-    const { repoName, ecosystem } = req.body;
-    if (!repoName)                   return res.status(400).json({ error: 'repoName is required' });
-    if (!ecosystem?.services?.length) return res.status(400).json({ error: 'No ecosystem defined' });
 
     const creds = await getGithubCreds(userId);
     if (!creds) return res.status(400).json({ error: 'GitHub not configured' });
+
+    const ecosystem = await db.collection('ecosystems').findOne({ userId });
+    if (!ecosystem?.repoName)          return res.status(400).json({ error: 'No repo set — create or load an ecosystem first' });
+    if (!ecosystem?.services?.length)  return res.status(400).json({ error: 'No services defined' });
+    const { repoName } = ecosystem;
 
     const userDoc = await db.collection('users').findOne({ userId });
     const apiKey  = userDoc?.anthropicApiKey;
