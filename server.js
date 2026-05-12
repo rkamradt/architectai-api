@@ -7,7 +7,85 @@ const { randomUUID }  = require('crypto');
 const { runImplementationAgent } = require('./agent');
 
 // ── Default model ─────────────────────────────────────────────────────────────
-const DEFAULT_MODEL = 'claude-sonnet-4-6';
+const DEFAULT_MODEL  = 'claude-sonnet-4-6';
+const MAX_TOKENS     = 2048;
+
+// ── Chat helpers ──────────────────────────────────────────────────────────────
+
+function buildPrompt(services) {
+  return `You are ArchitectAI — a senior software architect specializing in microservices, event-driven systems, and distributed architecture.
+
+Your expertise includes: service decomposition and bounded contexts (DDD), REST/gRPC/GraphQL API design, event-driven patterns (Kafka, CQRS, event sourcing, Saga), resilience patterns (circuit breaker, bulkhead, retry with backoff), service mesh, distributed tracing, data ownership and consistency boundaries, Kubernetes, AWS, and GitOps/ArgoCD deployment.
+
+Current ecosystem state:
+${services.length === 0
+  ? '(empty — no services defined yet)'
+  : JSON.stringify(services, null, 2)}
+
+When the user has agreed to add or update a service, emit EXACTLY this JSON block — no prose inside the tags:
+<ecosystem_update>
+{"action":"add","service":{"id":"kebab-case-id","name":"ServiceName","purpose":"One sentence: what this service owns and is responsible for","tech":"Spring Boot","archetype":"http","apis":[{"method":"POST","path":"/path","description":"what this endpoint does"}],"events":[{"direction":"produces","topic":"domain.event.name","description":"what payload this carries"}],"dependencies":["other-service-id"]}}
+</ecosystem_update>
+
+Emit ecosystem_update ONLY when formalizing agreed services — not speculatively during discussion.
+Use "action": "add", "update", or "remove" as appropriate.
+
+## Service archetypes
+
+Every service must have one of these archetypes — choose the one that best describes its primary role:
+
+- **http** — Standard REST/gRPC service with its own API surface and data store. No naming suffix required.
+- **messaging** — Primarily event-driven; publishes and/or subscribes to topics. No naming suffix required.
+- **provider** — Wraps a third-party or external API, exposing it to the ecosystem. The service id MUST end in \`-provider\` and the name MUST end in \`Provider\`. Include a \`foreignApi\` block: \`{"name":"...","baseUrl":"...","authMethod":"apiKey|oauth2|basic","generateMock":true}\`.
+- **adaptor** — Bridges a foreign protocol or data format into the ecosystem. The service id MUST end in \`-adaptor\` and the name MUST end in \`Adaptor\`. Include an \`accepts\` block: \`{"protocol":"...","format":"...","foreignEntity":"...","generateMock":true,"mockBehavior":"..."}\`.
+
+Provider example:
+<ecosystem_update>
+{"action":"add","service":{"id":"stripe-provider","name":"StripeProvider","purpose":"Wraps the Stripe payments API, exposing charge and refund operations to the ecosystem","tech":"Node.js/Express","archetype":"provider","foreignApi":{"name":"Stripe","baseUrl":"https://api.stripe.com","authMethod":"apiKey","generateMock":true},"apis":[{"method":"POST","path":"/charges","description":"Create a charge via Stripe"}],"events":[{"direction":"produces","topic":"payment.charged","description":"Emitted when a charge succeeds"}],"dependencies":[]}}
+</ecosystem_update>
+
+Adaptor example:
+<ecosystem_update>
+{"action":"add","service":{"id":"sftp-adaptor","name":"SftpAdaptor","purpose":"Polls an SFTP server for CSV files and emits structured events","tech":"Node.js/Express","archetype":"adaptor","accepts":{"protocol":"SFTP","format":"CSV","foreignEntity":"OrderExport","generateMock":true,"mockBehavior":"Emit one order.received event per CSV row"},"apis":[],"events":[{"direction":"produces","topic":"order.received","description":"Emitted for each row in an ingested CSV file"}],"dependencies":[]}}
+</ecosystem_update>
+
+Architectural principles to uphold:
+- Single responsibility: each service owns one bounded context
+- No shared databases between services
+- Flag circular dependencies, chatty inter-service calls, data ownership violations
+- Prefer async event-driven communication for cross-domain concerns
+- Recommend specific patterns, not "it depends" hedging
+- Call out when a proposed service is too broad or could be split`;
+}
+
+function parseUpdates(text) {
+  const out = [];
+  const re  = /<ecosystem_update>([\s\S]*?)<\/ecosystem_update>/g;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    try { out.push(JSON.parse(m[1].trim())); } catch {}
+  }
+  return out;
+}
+
+function stripTags(text) {
+  return text.replace(/<ecosystem_update>[\s\S]*?<\/ecosystem_update>/g, '').trim();
+}
+
+function applyUpdates(services, updates) {
+  let next = [...services];
+  for (const u of updates) {
+    if (!u.service) continue;
+    const idx = next.findIndex(s => s.id === u.service.id);
+    if (u.action === 'remove') {
+      next = next.filter(s => s.id !== u.service.id);
+    } else {
+      if (idx >= 0) next[idx] = u.service;
+      else next.push(u.service);
+    }
+  }
+  return next;
+}
 
 // ── Ecosystem file generators ─────────────────────────────────────────────────
 // Ported from the frontend so the backend owns file format knowledge.
@@ -228,29 +306,59 @@ app.put('/api/user/github', checkJwt, async (req, res) => {
   }
 });
 
-// ── Anthropic proxy ───────────────────────────────────────────────────────────
+// ── Anthropic chat ────────────────────────────────────────────────────────────
+// Receives: { messages: apiHistory }
+// Returns:  { content: displayText, updates: [{ action, service }] }
 app.post('/api/messages', checkJwt, async (req, res) => {
   try {
     const userId  = req.auth.payload.sub;
-    const userDoc = await db.collection('users').findOne({ userId });
-    const apiKey  = userDoc?.anthropicApiKey;
+    const [userDoc, ecosystemDoc] = await Promise.all([
+      db.collection('users').findOne({ userId }),
+      db.collection('ecosystems').findOne({ userId }),
+    ]);
+
+    const apiKey = userDoc?.anthropicApiKey;
     if (!apiKey) {
       return res.status(402).json({ error: 'No Anthropic API key configured. Please add your key in settings.' });
     }
-    // Inject the user's stored model — overrides whatever the client sent
-    const model = userDoc?.anthropicModel || DEFAULT_MODEL;
-    const body  = { ...req.body, model };
+
+    const model    = userDoc?.anthropicModel || DEFAULT_MODEL;
+    const services = ecosystemDoc?.services  || [];
+    const { messages } = req.body;
+
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method:  'POST',
       headers: {
-        'Content-Type':    'application/json',
-        'x-api-key':       apiKey,
+        'Content-Type':      'application/json',
+        'x-api-key':         apiKey,
         'anthropic-version': '2023-06-01',
       },
-      body: JSON.stringify(body),
+      body: JSON.stringify({
+        model,
+        max_tokens: MAX_TOKENS,
+        system:     buildPrompt(services),
+        messages,
+      }),
     });
+
     const data = await response.json();
-    res.status(response.status).json(data);
+    if (!response.ok) return res.status(response.status).json(data);
+
+    const raw     = data.content?.map(b => b.text || '').join('') || '';
+    const updates = parseUpdates(raw);
+    const content = stripTags(raw);
+
+    // Apply any service updates to the stored ecosystem
+    if (updates.length) {
+      const updatedServices = applyUpdates(services, updates);
+      await db.collection('ecosystems').updateOne(
+        { userId },
+        { $set: { services: updatedServices, updatedAt: new Date() } },
+        { upsert: true }
+      );
+    }
+
+    res.json({ content, updates });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
