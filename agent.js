@@ -1091,7 +1091,7 @@ async function runSession(initialPrompt, apiKey, onProgress, outputDir, workspac
 
 // ── Orchestrator ──────────────────────────────────────────────────────────────
 
-async function runImplementationAgent(spec, apiKey, onProgress, outputDir = null, isCancelled = async () => false) {
+async function runImplementationAgent(spec, apiKey, onProgress, outputDir = null, isCancelled = async () => false, sonnetModel = MODEL_SONNET) {
   const workspace = {};
 
   // Validate and correct archetype naming conventions before generating
@@ -1103,7 +1103,7 @@ async function runImplementationAgent(spec, apiKey, onProgress, outputDir = null
       return workspace;
     }
     onProgress({ type: 'service', message: `Implementing ${service.id}`, service: service.id });
-    await runSession(buildServicePrompt(correctedSpec, service), apiKey, onProgress, outputDir, workspace, service.id);
+    await runSession(buildServicePrompt(correctedSpec, service), apiKey, onProgress, outputDir, workspace, service.id, sonnetModel);
 
     // Generate companion mock service if applicable (Haiku — mechanical task)
     if (service.archetype === 'provider' && service.foreignApi?.generateMock) {
