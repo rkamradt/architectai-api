@@ -30,6 +30,8 @@ When the user has agreed to add or update a service, emit EXACTLY this JSON bloc
 Emit ecosystem_update ONLY when formalizing agreed services — not speculatively during discussion.
 Use "action": "add", "update", or "remove" as appropriate.
 
+When you emit an ecosystem_update, describe the service briefly in natural language — do NOT show the raw JSON definition in your response text. The interface will render the service details automatically.
+
 ## Service archetypes
 
 Every service must have one of these archetypes — choose the one that best describes its primary role:
